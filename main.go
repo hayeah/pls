@@ -168,16 +168,22 @@ type Runner struct {
 }
 
 func (r *Runner) RenderPrompt() (string, error) {
+	var err error
+
 	// read prompt file
 	prompt, err := os.ReadFile(r.args.PromptFile)
 	if err != nil {
 		return "", err
 	}
 
-	// read input file
-	input, err := os.ReadFile(r.args.InputFile)
-	if err != nil {
-		return "", err
+	var input []byte
+
+	if r.args.InputFile != "" {
+		// read input file if given
+		input, err = os.ReadFile(r.args.InputFile)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	// render prompt with input
