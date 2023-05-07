@@ -14,6 +14,8 @@ import (
 	"github.com/alexflint/go-arg"
 	"github.com/atotto/clipboard"
 	"github.com/sashabaranov/go-openai"
+
+	"github.com/hayeah/pls/promptstr"
 )
 
 type Chat struct {
@@ -51,7 +53,12 @@ func NewChat(client *openai.Client, opts ...ChatOptions) *Chat {
 	c := &Chat{
 		client: client,
 		baseRequest: openai.ChatCompletionRequest{
-			Model: openai.GPT3Dot5Turbo,
+			// Temperature: 0.5,
+			// Temperature: 1.5. seems bad
+			// Model: openai.GPT3Dot5Turbo,
+			// Model:     openai.GPT3Dot5Turbo0301,
+			// MaxTokens: 1000,
+			Model: openai.GPT3Dot5Turbo0301,
 		},
 	}
 
@@ -72,14 +79,23 @@ func (rs *ResponseStream) Close() error {
 	return nil
 }
 
-func (c *Chat) Stream(message string) (io.ReadCloser, error) {
+func (c *Chat) Stream(message string, opts *TemplateFrontMatter) (io.ReadCloser, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	req := c.cloneRequest()
-	req.Messages = append(req.Messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: message,
-	})
+	if opts != nil {
+		req.Temperature = float32(opts.Temperature)
+	}
+
+	req.Messages = append(req.Messages,
+		// openai.ChatCompletionMessage{
+		// 	Role:    openai.ChatMessageRoleSystem,
+		// 	Content: "please be as helpful as possible, and give detailed, informative response. it's good to produce long output to be extra helpful.",
+		// },
+		openai.ChatCompletionMessage{
+			Role:    openai.ChatMessageRoleUser,
+			Content: message,
+		})
 	req.Stream = true
 
 	stream, err := c.client.CreateChatCompletionStream(ctx, req)
@@ -130,26 +146,36 @@ type TemplateData struct {
 	Input string
 }
 
-func RenderTemplate(prompt string, data TemplateData) (string, error) {
+type TemplateFrontMatter struct {
+	// note: quirk of the openai library doesn't make it possible to use 0.0 for these options floats.
+	Temperature float32 `json:"temperature"`
+}
+
+func RenderTemplate(promptTemplate string, data TemplateData) (string, *TemplateFrontMatter, error) {
 	// this is my prompt yo
 	// ---
 	// END_OF_PROMPT. BEGIN INPUT.
 	// ---
 	// {{.Input}}`
+	var fm TemplateFrontMatter
+	promptBody, err := promptstr.ParseFrontMatter(promptTemplate, &fm)
+	if err != nil {
+		return "", nil, err
+	}
 
-	tmpl, err := template.New("template").Parse(prompt)
+	tmpl, err := template.New("template").Parse(promptBody)
 
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	var buf bytes.Buffer
 	err = tmpl.Execute(&buf, data)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
-	return buf.String(), nil
+	return buf.String(), &fm, nil
 }
 
 type Args struct {
@@ -167,13 +193,13 @@ type Runner struct {
 	chat *Chat
 }
 
-func (r *Runner) RenderPrompt() (string, error) {
+func (r *Runner) RenderPrompt() (string, *TemplateFrontMatter, error) {
 	var err error
 
 	// read prompt file
 	prompt, err := os.ReadFile(r.args.PromptFile)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 
 	var input []byte
@@ -182,25 +208,19 @@ func (r *Runner) RenderPrompt() (string, error) {
 		// read input file if given
 		input, err = os.ReadFile(r.args.InputFile)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 
-	// render prompt with input
-	renderedPrompt, err := RenderTemplate(string(prompt), TemplateData{
+	return RenderTemplate(string(prompt), TemplateData{
 		Input: string(input),
 	})
-	if err != nil {
-		return "", err
-	}
-
-	return renderedPrompt, nil
 }
 
 // OutputStream produces the output stream of rendered prompt
-func (r *Runner) OutputStream(renderedPrompt string) (io.ReadCloser, error) {
+func (r *Runner) OutputStream(renderedPrompt string, frontMatter *TemplateFrontMatter) (io.ReadCloser, error) {
 
-	stream, err := r.chat.Stream(renderedPrompt)
+	stream, err := r.chat.Stream(renderedPrompt, frontMatter)
 	if err != nil {
 		return nil, err
 	}
@@ -260,7 +280,7 @@ func (r *Runner) ReplaceFile(stream io.Reader, outputfile string) error {
 }
 
 func (r *Runner) Run() error {
-	prompt, err := r.RenderPrompt()
+	prompt, frontMatter, err := r.RenderPrompt()
 	if err != nil {
 		return err
 	}
@@ -275,7 +295,7 @@ func (r *Runner) Run() error {
 		return nil
 	}
 
-	stream, err := r.OutputStream(prompt)
+	stream, err := r.OutputStream(prompt, frontMatter)
 	if err != nil {
 		return err
 	}
@@ -297,8 +317,6 @@ func (r *Runner) Run() error {
 func run() error {
 	var args Args
 	arg.MustParse(&args)
-
-	log.Println(args)
 
 	c := openai.NewClient(os.Getenv("OPENAI_SECRET"))
 	chat := NewChat(c)
