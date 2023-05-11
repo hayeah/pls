@@ -186,6 +186,7 @@ type Args struct {
 
 	OutputFile       string `arg:"positional" help:"output file. Use - for stdout"`
 	ReplaceInputFile bool   `arg:"-r,--replace" help:"inplace rewrite of the input file"`
+	NoInput          bool   `arg:"-n,--no-input" help:"use the prompt directly with no input"`
 }
 
 type Runner struct {
@@ -204,11 +205,18 @@ func (r *Runner) RenderPrompt() (string, *TemplateFrontMatter, error) {
 
 	var input []byte
 
-	if r.args.InputFile != "" {
-		// read input file if given
-		input, err = os.ReadFile(r.args.InputFile)
-		if err != nil {
-			return "", nil, err
+	if !r.args.NoInput {
+		if r.args.InputFile == "" {
+			// read from stdin as input
+			input, err = io.ReadAll(os.Stdin)
+			if err != nil {
+				return "", nil, err
+			}
+		} else {
+			input, err = os.ReadFile(r.args.InputFile)
+			if err != nil {
+				return "", nil, err
+			}
 		}
 	}
 
