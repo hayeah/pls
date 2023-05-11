@@ -6,8 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
+	"path"
+	"path/filepath"
+	"strings"
 	"text/template"
 	"time"
 
@@ -189,16 +193,48 @@ type Args struct {
 	NoInput          bool   `arg:"-n,--no-input" help:"use the prompt directly with no input"`
 }
 
+// TemplatePaths returns the paths to search for templates
+func TemplatePaths() ([]string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+
+	// default paths
+	paths := []string{
+		path.Join(home, "pls"),
+		path.Join(home, ".pls"),
+	}
+
+	// add paths in PLS_PATH
+	if plsPath := os.Getenv("PLS_PATH"); plsPath != "" {
+		// prepend paths
+		paths = append(strings.Split(plsPath, ":"), paths...)
+	}
+
+	return paths, nil
+}
+
 type Runner struct {
 	args Args
 	chat *Chat
+
+	templatePaths []string
 }
 
 func (r *Runner) RenderPrompt() (string, *TemplateFrontMatter, error) {
 	var err error
 
+	templateName := r.args.PromptFile
+
+	// search for template
+	templatePath, err := MatchNameInPaths(r.templatePaths, templateName)
+	if err != nil {
+		return "", nil, err
+	}
+
 	// read prompt file
-	prompt, err := os.ReadFile(r.args.PromptFile)
+	prompt, err := os.ReadFile(templatePath)
 	if err != nil {
 		return "", nil, err
 	}
@@ -227,7 +263,6 @@ func (r *Runner) RenderPrompt() (string, *TemplateFrontMatter, error) {
 
 // OutputStream produces the output stream of rendered prompt
 func (r *Runner) OutputStream(renderedPrompt string, frontMatter *TemplateFrontMatter) (io.ReadCloser, error) {
-
 	stream, err := r.chat.Stream(renderedPrompt, frontMatter)
 	if err != nil {
 		return nil, err
@@ -322,6 +357,50 @@ func (r *Runner) Run() error {
 	return r.ReplaceFile(stream, outputFile)
 }
 
+var ErrNotFound = errors.New("no template found")
+
+// MatchNameInPaths returns the first file that exactly matches "name" in the list of paths
+func MatchNameInPaths(paths []string, name string) (matchedFile string, err error) {
+	if name == "" {
+		return "", errors.New("name cannot be empty")
+	}
+
+	for _, path := range paths {
+		err := filepath.WalkDir(path, func(curPath string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+
+			log.Println("match", curPath, d.Name())
+
+			if curPath == path {
+				// continue walking
+				return nil
+			}
+
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+
+			if dname := d.Name(); dname == name {
+				matchedFile = curPath
+				return filepath.SkipAll
+			}
+
+			return nil
+		})
+
+		if err != nil {
+			return "", err
+		}
+
+		if matchedFile != "" {
+			return matchedFile, nil
+		}
+	}
+	return "", ErrNotFound
+}
+
 func run() error {
 	var args Args
 	arg.MustParse(&args)
@@ -329,9 +408,16 @@ func run() error {
 	c := openai.NewClient(os.Getenv("OPENAI_SECRET"))
 	chat := NewChat(c)
 
+	templatePaths, err := TemplatePaths()
+	if err != nil {
+		return err
+	}
+
 	runner := &Runner{
 		args: args,
 		chat: chat,
+
+		templatePaths: templatePaths,
 	}
 
 	return runner.Run()
